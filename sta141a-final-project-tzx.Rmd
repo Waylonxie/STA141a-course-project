@@ -1,0 +1,858 @@
+---
+title: "sta141a final project"
+output: html_document
+date: "2025-02-14"
+---
+
+
+# I. Introduction
+
+#### A previous study was carried out to build a framework for understanding visual coding in the mouse brain. Experiments were performed on a total of 10 mice over 39 sessions, and each session included several hundred trials. In each trial, the researchers randomly presented visual stimuli to a mouse on its both sides and gave reward or penalty depending on the mouse’s reaction. The behavior of the mouse and activity of neurons in the mouse were recorded to a large database. In my study, I’ll be using an 18-session subset of their database, studying the homogeneity and heterogeneity across sessions and mice, and building a model to predict the mouse’s feedback towards the visual stimuli. 
+
+```{r}
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('/Users/xietianze/Desktop/Data/sessions/session',i,'.rds',sep=''))
+  print(session[[i]]$mouse_name)
+  print(session[[i]]$date_exp)
+}
+
+```
+
+
+
+# II. Exploratory Data Analysis
+
+## 1. summary of data
+
+#### For each session dataset, there are eight variables. Each dataset contains information about the name of mouse used, the date of experiment, contrast of the left stimulus for each trial, contrast of the right stimulus for each trial, type of the feedback for each trial, numbers of spikes of neurons in different brain areas in forty time bins, centers of the time bins for spikes, and area of the brain where each neuron is present. The data of spikes of neurons were recorded as a list of matrices, with each matrix representing a trial, each row of a matrix representing a nueron, and each column of a matrix representing a time bin.
+
+#### For example, The first dataset collected using Cori mice in 2016-12-14 has a total of 114 trials, with a total of 734 neurons from 8 brain areas and 40 time bins in each trial. 
+
+#### The table below summarizes some basic information about each trial, including the type of mouth, date, number of trials, number of neurons, the total success feedback number and the success rate, and the average number of spikes of the session. 
+
+```{r}
+
+summary_data <- data.frame(
+  session = 1:18, Mouse = NA,Date = NA,Trials = NA,Neurons = NA,Total_Success = NA,Success_Rate = NA, Avg_Spikes = NA
+)
+
+for (i in 1:18) {
+  session_data <- session[[i]]
+  
+  summary_data$Mouse[i] <- unique(session_data$mouse_name)
+  summary_data$Date[i] <- session_data$date_exp
+  summary_data$Trials[i] <- length(session_data$spks)  # Total number of trials
+  summary_data$Neurons[i] <- nrow(session_data$spks[[1]]) # Number of neurons in the first trial
+  summary_data$Total_Success[i] <- sum(session_data$feedback_type == 1, na.rm = TRUE) # Total successes
+  
+  # Calculate success rate
+  summary_data$Success_Rate[i] <- ifelse(summary_data$Trials[i] > 0, 
+                                         summary_data$Total_Success[i] / summary_data$Trials[i], 
+                                         NA)
+  
+  all_spikes <- sapply(session_data$spks, function(trial) mean(rowSums(trial)))
+  summary_data$Avg_Spikes[i] <- mean(all_spikes, na.rm = TRUE)
+}
+
+print(summary_data)
+
+
+```
+
+#### Below is the number of brain areas in each session. Because the same brain area could be measured at different sessions, I also calculated the total unique brain areas measured across all sessions.
+
+```{r}
+brain_area_count_per_session <- data.frame(
+  Session = integer(),
+  Unique_Brain_Areas = integer()
+)
+
+all_unique_brain_areas <- c()
+
+for (i in 1:18) {
+  session_data <- session[[i]]
+  
+  unique_areas <- unique(session_data$brain_area)
+  
+  brain_area_count_per_session <- rbind(brain_area_count_per_session, data.frame(
+    Session = i,
+    Unique_Brain_Areas = length(unique_areas)
+  ))
+  
+  all_unique_brain_areas <- unique(c(all_unique_brain_areas, unique_areas))
+}
+
+total_unique_brain_areas <- length(all_unique_brain_areas)
+
+print(brain_area_count_per_session)
+cat("Total Unique Brain Areas Across All Sessions:", total_unique_brain_areas, "\n")
+
+```
+
+#### I calculated the constract differences and their corresponding success rate. There seems to be a correlation between the contrast difference and the feedback, as the a constract difference of 1 has an average success rate of 0.8447489 while no constract difference would only have a success rate of 0.6434783.
+
+```{r}
+library(dplyr)
+
+# Initialize an empty list to store trial data
+all_trials <- list()
+
+for (i in 1:18) {
+  session_data <- session[[i]]
+  num_trials <- length(session_data$spks)
+  
+  trial_list <- lapply(seq_len(num_trials), function(t) {
+    data.frame(
+      contrast_left = session_data$contrast_left[t],
+      contrast_right = session_data$contrast_right[t],
+      contrast_diff = session_data$contrast_left[t] - session_data$contrast_right[t],
+      feedback_type = session_data$feedback_type[t]
+    )
+  })
+  
+  all_trials[[i]] <- bind_rows(trial_list)
+}
+
+trial_data <- bind_rows(all_trials)
+
+contrast_summary <- trial_data %>%
+  group_by(contrast_diff) %>%
+  summarise(
+    total_trials = n(),
+    total_success = sum(feedback_type == 1, na.rm = TRUE),
+    success_rate = total_success / total_trials
+  ) %>%
+  arrange(desc(success_rate))
+
+print(contrast_summary)
+
+
+```
+
+
+## 2. Visualization of changes
+
+
+### 2-1. Graph of cumulative success rate of different mouse types
+
+#### The graph is showing the cumulative success rate for each mouse. From the plot, we can tell that the cumulative success rates for every type of mouth become stable at certain rates as the trial number increases. Different mouth type seems to have different success rates. For example, Lederberg mouse has a cumulative success rate around 0.75, while Cori mouse has a success rate around 0.65.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+mouse_trials = data.frame(Mouse = character(), Trial = integer(), SuccessRate = numeric())
+
+mouse_names = unique(sapply(session, function(s) s$mouse_name))
+
+for (mouse in mouse_names) {
+  all_feedback = unlist(lapply(session, function(s) if (s$mouse_name == mouse) s$feedback_type else NULL))
+  success_rate = cumsum(all_feedback == 1) / (1:length(all_feedback))
+  mouse_df = data.frame(Mouse = rep(mouse, length(success_rate)), 
+                         Trial = 1:length(success_rate), 
+                         SuccessRate = success_rate)
+  mouse_trials = rbind(mouse_trials, mouse_df)
+}
+
+# Plot success rate trends for different mice
+ggplot(mouse_trials, aes(x = Trial, y = SuccessRate, color = Mouse, group = Mouse)) +
+  geom_line(size = 1) +
+  labs(title = "Cumulative Success Rate Over Trials for Different Mice",
+       x = "Trial", y = "Success Rate", color = "Mouse") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+```
+
+
+
+### 2-2. Brain Area Activation Patterns Across Sessions
+
+#### I plot a heatmap for different brain area activation across sessions. The activation index is calculated by dividing the trials that have at least one neuron at the brain area activated by the total number of trails. I need to mention that no activation of a brain area in a session does not necessarily mean there was no neural activity in the brain area across the session - Instead, it could be because the scholars didn't measure the brain area for the session.
+
+#### From the heatmap, we can see that some brain areas are frequently activated in different sessions, while some brain areas are only activated at very few sessions and trials. From the plot we can also tell that the brain area activated most is root, but in some sessions, measurements of roots were still not measured. No brain area has been measured constantly through all sessions, which could make prediction model more challenging.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+brain_area_activation = data.frame(Session = integer(), Mouse = character(), BrainArea = character(), Activation = numeric())
+
+for (i in 1:18) {
+  session_data = session[[i]]
+  brain_areas = session_data$brain_area
+  num_trials = length(session_data$spks)
+  
+  for (area in unique(brain_areas)) {
+    neurons_in_area = which(brain_areas == area)
+    mean_activation = mean(sapply(session_data$spks, function(trial) mean(rowSums(trial[neurons_in_area, ]) > 0)))
+    
+    brain_area_activation = rbind(brain_area_activation, data.frame(Session = i, 
+                                                                     Mouse = session_data$mouse_name, 
+                                                                     BrainArea = area, 
+                                                                     Activation = mean_activation))
+  }
+}
+
+brain_area_order = brain_area_activation %>%
+  group_by(BrainArea) %>%
+  summarize(ActivationCount = sum(Activation > 0, na.rm = TRUE)) %>%
+  arrange(desc(ActivationCount))
+
+brain_area_activation$BrainArea = factor(brain_area_activation$BrainArea, levels = rev(brain_area_order$BrainArea))
+
+ggplot(brain_area_activation, aes(x = factor(Session), y = BrainArea, fill = Activation)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "red") +
+  labs(title = "Brain Area Activation Across Sessions",
+       x = "Session", y = "Brain Area", fill = "Activation") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10)) +
+  coord_fixed(ratio = 0.4)
+
+```
+
+### 2-3. success rate as trial number increases
+
+#### I combined data across all sessions and draw a plot to see if the success rate increases as the trial number increases. To make the plot looks clearer, I grouped every twenty trials to one bar on the plot. As the plot shows, there seems to have a decrease in success rate as the trial number increases.
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+trial_success_data <- list()
+
+for (i in 1:18) {
+  session_data <- session[[i]]
+  num_trials <- length(session_data$feedback_type)
+  
+  trial_df <- data.frame(
+    trial_id = seq_len(num_trials),
+    feedback_type = session_data$feedback_type
+  )
+  
+  trial_success_data[[i]] <- trial_df
+}
+
+# Combine all session data
+combined_trial_data <- bind_rows(trial_success_data)
+
+# Create bins of 10 trials each
+combined_trial_data <- combined_trial_data %>%
+  mutate(trial_group = ceiling(trial_id / 20)) 
+
+# Aggregate total trials and total successes for each trial group
+trial_summary <- combined_trial_data %>%
+  group_by(trial_group) %>%
+  summarise(
+    total_trials = n(),
+    total_success = sum(feedback_type == 1, na.rm = TRUE),
+    success_rate = (total_success / total_trials) * 100  # Convert to percentage
+  ) %>%
+  ungroup()
+
+# Remove rows with NA success rate
+trial_summary <- trial_summary %>% filter(!is.na(success_rate))
+
+# Create the plot
+ggplot(trial_summary, aes(x = trial_group, y = success_rate)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.7, width = 0.8) +
+  scale_x_continuous(breaks = seq(1, max(trial_summary$trial_group), by = 1)) +  # Label every group
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    title = "Success Rate Across Trials (Grouped by 10 Trials)",
+    x = "Trial Group (Each 20 Trials)",
+    y = "Success Rate (%)"
+  ) +
+  theme_minimal()
+
+```
+
+
+### 2-4. Brain Area Activation Patterns in different mice
+
+#### This is a heatmap that shows the brain area activation condition in different mice, and brain areas that were measured in most mice types were organized on top on the graph. As shown in the graph, some brain areas had data in all types of mice. This could be helpful for prediction model analysis.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Initialize data storage
+brain_area_mouse_activation <- data.frame()
+
+# Loop through all sessions
+for (i in 1:18) {
+  session_data <- session[[i]]
+  
+  for (area in unique(session_data$brain_area)) {
+    neurons_in_area <- which(session_data$brain_area == area)
+    
+    mean_activation <- mean(sapply(session_data$spks, function(trial) mean(rowSums(trial[neurons_in_area, ]) > 0)))
+    
+    brain_area_mouse_activation <- rbind(brain_area_mouse_activation, data.frame(
+      Mouse = session_data$mouse_name,
+      BrainArea = area,
+      Activation = mean_activation
+    ))
+  }
+}
+
+# Rank brain areas by frequency and reverse order
+brain_area_counts <- brain_area_mouse_activation %>%
+  count(BrainArea, name = "Frequency") %>%
+  arrange(Frequency)
+
+# Convert BrainArea to factor for plotting
+brain_area_mouse_activation$BrainArea <- factor(brain_area_mouse_activation$BrainArea, levels = brain_area_counts$BrainArea)
+
+# Create the plot
+ggplot(brain_area_mouse_activation, aes(x = Mouse, y = BrainArea)) +
+  geom_point(size = 1.5, shape = 21, fill = "black") +
+  labs(title = "Brain Area Activation Across Mice",
+       x = "Mouse", y = "Brain Area") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 10))
+
+```
+
+
+
+
+
+# III. Data integration
+
+## 3-1. Average spikes data
+
+### 3-1-1. integrate data across sessions to one list
+
+#### Here I turned each trial of each session to a row, and put data across different sessions into one data frame. I used the average spikes of each trail as a variable, in order to build a simplest prediction model. Because in different sessions, different brain areas were measured, the average spikes might not be a good indicator for prediction. 
+
+
+```{r}
+library(dplyr)
+
+all_trials = list()
+
+for (i in 1:18) {
+  session_data = session[[i]]  
+  num_trials = length(session_data$feedback_type)
+
+  trial_list = list()
+  
+  for (t in seq_len(num_trials)) {
+    spk_matrix <- session_data$spks[[t]] 
+    
+    if (!is.null(spk_matrix)) {
+      trial_data = data.frame(
+        session = i,
+        mouse_name = session_data$mouse_name,
+        date_exp = session_data$date_exp,
+        trial = t,
+        feedback_type = session_data$feedback_type[t],
+        contrast_left = session_data$contrast_left[t],
+        contrast_right = session_data$contrast_right[t],
+        average_spikes = mean(spk_matrix)  # Compute mean spike count
+      )
+      
+      trial_list[[t]] = trial_data
+    }
+  }
+  
+  all_trials[[i]] = bind_rows(trial_list)
+}
+
+final_data = bind_rows(all_trials)
+
+head(final_data)
+```
+
+
+## 3-2. PCA for neuron spikes data in each session
+
+#### The code below could calculate the total spikes per neuron across all time bins for each trial. Then I removed brain areas with spikes of zero variance and performed Principal Component Analysis (PCA) on neural spike activity for each session. The principal components for each session is DIFFERENT. I calculated how many principal components are needed to explain 90% of variance of the data, and summarized the results to the table below. As the table shows, for example, 82 PCs are needed to explain 90% variance of session 1 neural activity data, 178 PCs are needed to explain 90% variance of session 2 data, and so on. As the top PCs can't explain the variance well, I choose not to use the PCA of neural activity data for the prediction model. 
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# List to store the number of PCs required per session
+pc_count_list <- list()
+
+for (i in 1:18) {
+  session_data <- session[[i]]
+  
+  num_trials <- length(session_data$feedback_type)
+  trial_list <- list()
+  
+  for (t in seq_len(num_trials)) {
+    spk_matrix <- session_data$spks[[t]]  # Raw spike matrix (neurons × time bins)
+    
+    if (!is.null(spk_matrix)) {
+      neuron_spikes <- rowSums(spk_matrix)  # Total spikes per neuron
+      
+      trial_data <- data.frame(
+        session = i,
+        trial = t,
+        mouse_name = session_data$mouse_name,
+        feedback_type = session_data$feedback_type[t]
+      )
+      
+      for (j in seq_along(neuron_spikes)) {
+        trial_data[paste0("Neuron_", j)] <- neuron_spikes[j]
+      }
+      
+      trial_list[[t]] <- trial_data
+    }
+  }
+  
+  session_df <- bind_rows(trial_list)
+  
+  pca_matrix <- as.matrix(session_df[, -c(1:4)])
+  
+  # Remove columns with zero variance
+  pca_matrix <- pca_matrix[, apply(pca_matrix, 2, var) > 0]
+  
+  if (ncol(pca_matrix) > 1) {
+    pca_result <- prcomp(pca_matrix, center = TRUE, scale. = TRUE)
+    
+    cumulative_variance <- cumsum(pca_result$sdev^2 / sum(pca_result$sdev^2))
+    
+    # Find the minimum number of PCs required to reach 90% variance
+    num_pcs_90 <- which(cumulative_variance >= 0.90)[1]
+    
+    pc_count_list[[i]] <- data.frame(session = i, pcs_needed_for_90 = num_pcs_90)
+  }
+}
+
+pc_count_df <- bind_rows(pc_count_list)
+
+print(pc_count_df)
+
+
+```
+
+
+
+## 3-3. spikes data in brain areas
+
+#### For each trial, I summed up the number of spikes in each brain area. As different brain areas were measured in different sessions, I made separate data frames for different sessions.
+
+
+```{r}
+library(dplyr)
+
+session_summaries <- list()
+
+for (i in 1:18) {
+  session_data <- session[[i]]
+  
+  num_trials <- length(session_data$feedback_type)
+  
+  trial_list <- list()
+  
+  for (t in seq_len(num_trials)) {
+    spk_matrix <- session_data$spks[[t]]
+    
+    if (!is.null(spk_matrix)) {
+      spike_sums <- tapply(rowSums(spk_matrix), session_data$brain_area, sum)
+      
+      avg_spikes <- mean(rowSums(spk_matrix))
+      
+      trial_data <- data.frame(
+        session = i,
+        trial = t,
+        mouse_name = session_data$mouse_name,
+        feedback_type = session_data$feedback_type[t],
+        contrast_left = session_data$contrast_left[t],   # Fixed indexing
+        contrast_right = session_data$contrast_right[t], # Fixed indexing
+        avg_spikes = avg_spikes,
+        t(spike_sums)
+      )
+      
+      trial_list[[t]] <- trial_data
+    }
+  }
+  
+  session_summaries[[paste0("session_", i)]] <- bind_rows(trial_list)
+}
+
+# View the first few rows and check the row count
+head(session_summaries$session_1)
+nrow(session_summaries$session_1)
+
+```
+
+
+
+
+# IV. Model training and prediction
+
+## 4-1. training set and testing set.
+
+#### I choose to randomly divide data and make 80% of it training set and 20% of it testing set.
+
+```{r}
+set.seed(123)  # For reproducibility
+
+# Extract only relevant columns (those used in modeling)
+modeling_columns <- c("contrast_left", "contrast_right", "contrast_diff", "avg_spikes", "mouse_name", "feedback_type")
+
+train_data_list <- list()
+test_data_list <- list()
+
+for (i in 1:18) {
+  session_data <- session_summaries[[paste0("session_", i)]]
+  
+  # Keep only columns needed for modeling, ensuring missing ones are added with NA
+  session_data <- session_data[, intersect(names(session_data), modeling_columns), drop = FALSE]
+  missing_cols <- setdiff(modeling_columns, names(session_data))
+  session_data[missing_cols] <- NA  # Add missing columns
+  
+  # Split into training (80%) and testing (20%) sets
+  n <- nrow(session_data)
+  test_indices <- sample(1:n, size = 0.2 * n)
+  
+  test_data_list[[i]] <- session_data[test_indices, ]
+  train_data_list[[i]] <- session_data[-test_indices, ]
+}
+
+# Combine all sessions into unified train/test sets
+combined_train_data <- do.call(rbind, train_data_list)
+test_data <- do.call(rbind, test_data_list)
+
+cat("Total Training set size:", nrow(combined_train_data), "\n")
+cat("Total Testing set size:", nrow(test_data), "\n")
+
+```
+
+## 4-2. GLM model with average spikes across all sessions
+
+
+```{r}
+combined_train_data$feedback_type <- as.factor(combined_train_data$feedback_type)
+test_data$feedback_type <- as.factor(test_data$feedback_type)
+
+glm_model <- glm(feedback_type ~ avg_spikes, data = combined_train_data, family = binomial)
+
+predicted_prob <- predict(glm_model, newdata = test_data, type = "response")
+
+predicted_class <- ifelse(predicted_prob > 0.7, 1, -1)
+predicted_class <- as.factor(predicted_class)
+
+accuracy <- mean(predicted_class == test_data$feedback_type)
+cat("Accuracy on Test Data:", accuracy, "\n")
+
+```
+
+
+## 4-3. GLM with average spikes, left contrast and right contrast, and mouse type
+
+```{r}
+library(caret)
+library(ROCR)
+
+library(caret)
+library(ROCR)
+
+combined_train_data$feedback_type <- as.factor(combined_train_data$feedback_type)
+test_data$feedback_type <- as.factor(test_data$feedback_type)
+combined_train_data$mouse_name <- as.factor(combined_train_data$mouse_name)
+test_data$mouse_name <- as.factor(test_data$mouse_name)
+
+glm_model_full <- glm(feedback_type ~ avg_spikes + contrast_left + contrast_right  + mouse_name,
+                      data = combined_train_data, family = binomial)
+
+```
+```{r}
+
+predicted_prob_full <- predict(glm_model_full, newdata = test_data, type = "response")
+
+predicted_class <- factor(ifelse(predicted_prob_full > 0.5, 1, -1), levels = c(-1, 1))
+
+accuracy <- mean(predicted_class == test_data$feedback_type)
+cat("Prediction Accuracy on Test Data:", accuracy, "\n")
+
+```
+
+
+
+## 4-4. xgboost model
+
+#### I also built a xgboost model with info about session id, trial id, contrast, contrast difference, and average spikes per time bin. 
+
+```{r}
+library(dplyr)
+library(xgboost)
+library(caret)
+
+all_trials <- list()
+
+for (i in 1:18) {
+  session_data <- session[[i]]
+  num_trials <- length(session_data$spks)
+  
+  trial_list <- lapply(seq_len(num_trials), function(t) {
+    spk_matrix <- session_data$spks[[t]]
+    
+    if (!is.null(spk_matrix)) {
+      avg_spikes_per_bin <- colMeans(spk_matrix, na.rm = TRUE)
+      
+      trial_data <- data.frame(
+        trial_id = as.numeric(t),
+        session_id = as.factor(i),
+        contrast_left = session_data$contrast_left[t],
+        contrast_right = session_data$contrast_right[t],
+        contrast_diff = session_data$contrast_left[t] - session_data$contrast_right[t],
+        feedback_type = session_data$feedback_type[t]
+      )
+      
+      for (bin in seq_along(avg_spikes_per_bin)) {
+        trial_data[[paste0("time_bin_", bin)]] <- avg_spikes_per_bin[bin]
+      }
+      
+      return(trial_data)
+    }
+  })
+  
+  all_trials[[i]] <- bind_rows(trial_list)
+}
+
+final_data <- bind_rows(all_trials)
+
+final_data$feedback_type <- as.factor(final_data$feedback_type)
+
+```
+
+```{r}
+final_data$feedback_type_numeric <- ifelse(final_data$feedback_type == 1, 1, 0)
+
+predictors <- model.matrix(feedback_type_numeric ~ . - feedback_type - feedback_type_numeric, data = final_data)[, -1]
+
+response <- final_data$feedback_type_numeric
+
+set.seed(123)
+train_index <- sample(1:nrow(final_data), 0.8 * nrow(final_data))
+
+train_data_xg <- predictors[train_index, ]
+train_label <- response[train_index]
+
+test_data_xg <- predictors[-train_index, ]
+test_label <- response[-train_index]
+
+dtrain <- xgb.DMatrix(data = train_data_xg, label = train_label)
+dtest <- xgb.DMatrix(data = test_data_xg, label = test_label)
+
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc"
+)
+
+xgb_model <- xgboost(params = params, 
+                     data = dtrain,
+                     nrounds = 100, 
+                     verbose = 0)
+
+predicted_prob <- predict(xgb_model, newdata = dtest)
+
+predicted_class <- ifelse(predicted_prob > 0.3, 1, 0)
+
+accuracy <- mean(predicted_class == test_label)
+cat("XGBoost Model Accuracy:", accuracy, "\n")
+
+```
+
+
+## 4-5. Comparison among models
+
+#### Besides the prediction accuracy numbers as shown in previous parts, I also drew the ROC curves and calculated the AUC values. The xgboost model turns out to have the highest AUC value and thus I consider it the best model for prediction.
+
+```{r}
+library(ROCR)
+
+# 1. GLM Model with avg_spikes only
+predicted_prob_glm <- predict(glm_model, newdata = test_data, type = "response")
+pred_glm <- prediction(predicted_prob_glm, as.numeric(as.character(test_data$feedback_type)))
+perf_glm <- performance(pred_glm, "tpr", "fpr")
+auc_glm <- performance(pred_glm, measure = "auc")@y.values[[1]]
+
+# 2. GLM Model with avg_spikes + contrast_left + contrast_right
+predicted_prob_glm_full <- predict(glm_model_full, newdata = test_data, type = "response")
+pred_glm_full <- prediction(predicted_prob_glm_full, as.numeric(as.character(test_data$feedback_type)))
+perf_glm_full <- performance(pred_glm_full, "tpr", "fpr")
+auc_glm_full <- performance(pred_glm_full, measure = "auc")@y.values[[1]]
+
+# 3. XGBoost Model (Using test_data_xg)
+pred_xgb <- prediction(predicted_prob, test_label)
+perf_xgb <- performance(pred_xgb, "tpr", "fpr")
+auc_xgb <- performance(pred_xgb, measure = "auc")@y.values[[1]]
+
+# Plotting all ROC curves
+plot(perf_glm, col = "blue", lwd = 3, lty = 3, main = "ROC Curve for Four Models")
+plot(perf_glm_full, col = "green", lwd = 2, lty = 1, add = TRUE)
+plot(perf_xgb, col = "purple", lwd = 2, lty = 4, add = TRUE)
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# Adding legend with AUCs
+legend("bottomright", legend = c(
+  paste("GLM (AUC =", round(auc_glm, 2), ")"),
+  paste("GLM Full (AUC =", round(auc_glm_full, 2), ")"),
+  paste("XGBoost (AUC =", round(auc_xgb, 2), ")")
+), col = c("blue", "green", "purple"), lwd = c(3, 2, 2, 2), lty = c(3, 1, 2, 4))
+
+```
+
+
+
+
+# V. Prediction Performance on the test sets
+
+```{r}
+test1 <- readRDS('/Users/xietianze/Desktop/test/test1.rds')
+test2 <- readRDS('/Users/xietianze/Desktop/test/test2.rds')
+```
+
+#### I tested the performance of xgboost model on test set 1 and 2. For both test 1, the prediction accuracy would be better than the simplest prediction - the prediction that every feedback is positive; and for test 2, the prediction accuracy would be slightly worse. The overall prediction accuracy for the xgboost model would be slightly better than the simplest prediction.
+
+```{r}
+prepare_test_data <- function(test_data, training_features) {
+  
+  # Compute average spikes per time bin
+  avg_spikes_per_bin <- t(sapply(seq_along(test_data$spks), function(t) {
+    trial <- test_data$spks[[t]]
+    if (!is.null(trial)) {
+      colMeans(trial, na.rm = TRUE)
+    } else {
+      rep(NA, 40)  # Fill missing data with NA
+    }
+  }))
+  
+  colnames(avg_spikes_per_bin) <- paste0("time_bin_", 1:40)
+  
+  test_df <- data.frame(
+    trial_id = seq_along(test_data$spks),  # Assign sequential trial IDs
+    contrast_left = test_data$contrast_left,
+    contrast_right = test_data$contrast_right,
+    contrast_diff = test_data$contrast_left - test_data$contrast_right
+  )
+  
+  # Merge with spike data
+  test_df <- cbind(test_df, avg_spikes_per_bin)
+  
+  # Remove columns that have all NA values or zero variance
+  test_df <- test_df %>% select(where(~ !all(is.na(.)) & length(unique(.)) > 1))
+  
+  # Ensure missing columns are added with zeros to match training features
+  missing_cols <- setdiff(training_features, colnames(test_df))
+  if (length(missing_cols) > 0) {
+    test_df[missing_cols] <- 0  
+  }
+  
+  # Reorder to match training data
+  test_df <- test_df[, training_features, drop = FALSE]
+  
+  return(test_df)
+}
+
+# Get training features
+training_features <- colnames(train_data_xg)
+
+# Process test datasets
+test1_df <- prepare_test_data(test1, training_features)
+test2_df <- prepare_test_data(test2, training_features)
+
+# Convert to DMatrix format for XGBoost
+dtest1 <- xgb.DMatrix(data = as.matrix(test1_df))
+dtest2 <- xgb.DMatrix(data = as.matrix(test2_df))
+
+```
+
+```{r}
+library(dplyr)
+library(xgboost)
+
+prepare_test_data <- function(test_data, training_features) {
+  
+  avg_spikes_per_bin <- t(sapply(test_data$spks, function(trial) {
+    if (!is.null(trial)) {
+      colMeans(trial, na.rm = TRUE)
+    } else {
+      rep(NA, 40)  
+    }
+  }))
+  
+  colnames(avg_spikes_per_bin) <- paste0("time_bin_", 1:40)
+  
+  test_df <- data.frame(
+    contrast_left = test_data$contrast_left,
+    contrast_right = test_data$contrast_right,
+    contrast_diff = test_data$contrast_left - test_data$contrast_right
+  )
+  
+  test_df <- cbind(test_df, avg_spikes_per_bin)
+  
+  test_df <- test_df %>% select(where(~ !all(is.na(.)) & length(unique(.)) > 1))
+  
+  missing_cols <- setdiff(training_features, colnames(test_df))
+  if (length(missing_cols) > 0) {
+    test_df[missing_cols] <- 0  
+  }
+  
+  test_df <- test_df[, training_features, drop = FALSE]
+  
+  return(test_df)
+}
+
+training_features <- colnames(train_data_xg)
+
+test1_df <- prepare_test_data(test1, training_features)
+test2_df <- prepare_test_data(test2, training_features)
+
+
+```
+
+```{r}
+predicted_prob_test1 <- predict(xgb_model, newdata = dtest1)
+predicted_prob_test2 <- predict(xgb_model, newdata = dtest2)
+
+predicted_class_test1 <- ifelse(predicted_prob_test1 > 0.35, 1, 0)
+predicted_class_test2 <- ifelse(predicted_prob_test2 > 0.35, 1, 0)
+
+test1_feedback <- ifelse(test1$feedback_type == "1", 1, 0)
+test2_feedback <- ifelse(test2$feedback_type == "1", 1, 0)
+
+accuracy_test1 <- mean(predicted_class_test1 == test1_feedback, na.rm = TRUE)
+accuracy_test2 <- mean(predicted_class_test2 == test2_feedback, na.rm = TRUE)
+
+cat("XGBoost Accuracy on Test1:", accuracy_test1, "\n")
+cat("XGBoost Accuracy on Test2:", accuracy_test2, "\n")
+```
+```{r}
+
+# Always predict feedback as 1
+simplest_predicted_test1 <- rep(1, length(test1$feedback_type))
+simplest_predicted_test2 <- rep(1, length(test2$feedback_type))
+
+test1_feedback <- ifelse(test1$feedback_type == "1", 1, 0)
+test2_feedback <- ifelse(test2$feedback_type == "1", 1, 0)
+
+simplest_accuracy_test1 <- mean(simplest_predicted_test1 == test1_feedback, na.rm = TRUE)
+simplest_accuracy_test2 <- mean(simplest_predicted_test2 == test2_feedback, na.rm = TRUE)
+
+cat("Simplest Model Accuracy on Test1:", simplest_accuracy_test1, "\n")
+cat("Simplest Model Accuracy on Test2:", simplest_accuracy_test2, "\n")
+
+```
+
+
+
+## Acknowledge
+
+#### my communication with Chatgpt: https://chatgpt.com/share/67d89b9a-cdf0-800f-9ed4-ba8869abb3b5
+#### https://chatgpt.com/share/67d8a158-4444-800f-aa5a-83ce01181ab8
+
+#### work of Alexia Huang on the project last year: https://github.com/aelxia/STA141A/blob/main/Course_project.Rmd
+
+
+
